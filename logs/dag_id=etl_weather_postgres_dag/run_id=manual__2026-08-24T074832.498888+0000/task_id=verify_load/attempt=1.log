@@ -1,0 +1,36 @@
+[2026-08-24T07:48:59.321+0000] {local_task_job_runner.py:123} INFO - ::group::Pre task execution logs
+[2026-08-24T07:48:59.390+0000] {taskinstance.py:2613} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: etl_weather_postgres_dag.verify_load manual__2026-08-24T07:48:32.498888+00:00 [queued]>
+[2026-08-24T07:48:59.446+0000] {taskinstance.py:2613} INFO - Dependencies all met for dep_context=requeueable deps ti=<TaskInstance: etl_weather_postgres_dag.verify_load manual__2026-08-24T07:48:32.498888+00:00 [queued]>
+[2026-08-24T07:48:59.448+0000] {taskinstance.py:2866} INFO - Starting attempt 1 of 2
+[2026-08-24T07:48:59.493+0000] {taskinstance.py:2889} INFO - Executing <Task(PythonOperator): verify_load> on 2026-08-24 07:48:32.498888+00:00
+[2026-08-24T07:48:59.516+0000] {standard_task_runner.py:104} INFO - Running: ['***', 'tasks', 'run', 'etl_weather_postgres_dag', 'verify_load', 'manual__2026-08-24T07:48:32.498888+00:00', '--job-id', '19', '--raw', '--subdir', 'DAGS_FOLDER/05_etl_weather_postgres.py', '--cfg-path', '/tmp/tmpbmke0e9h']
+[2026-08-24T07:48:59.512+0000] {warnings.py:112} WARNING - /home/***/.local/lib/python3.12/site-packages/***/task/task_runner/standard_task_runner.py:70: DeprecationWarning: This process (pid=261) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+
+[2026-08-24T07:48:59.525+0000] {standard_task_runner.py:105} INFO - Job 19: Subtask verify_load
+[2026-08-24T07:48:59.528+0000] {standard_task_runner.py:72} INFO - Started process 262 to run task
+[2026-08-24T07:48:59.738+0000] {task_command.py:467} INFO - Running <TaskInstance: etl_weather_postgres_dag.verify_load manual__2026-08-24T07:48:32.498888+00:00 [running]> on host 5e50b3edd4b7
+[2026-08-24T07:49:00.110+0000] {taskinstance.py:3132} INFO - Exporting env vars: AIRFLOW_CTX_DAG_OWNER='workshop' AIRFLOW_CTX_DAG_ID='etl_weather_postgres_dag' AIRFLOW_CTX_TASK_ID='verify_load' AIRFLOW_CTX_EXECUTION_DATE='2026-08-24T07:48:32.498888+00:00' AIRFLOW_CTX_TRY_NUMBER='1' AIRFLOW_CTX_DAG_RUN_ID='manual__2026-08-24T07:48:32.498888+00:00'
+[2026-08-24T07:49:00.115+0000] {taskinstance.py:731} INFO - ::endgroup::
+[2026-08-24T07:49:00.214+0000] {base.py:84} INFO - Retrieving connection 'postgres_target'
+[2026-08-24T07:49:00.233+0000] {sql.py:553} INFO - Running statement: SELECT COUNT(*) FROM weather_records;, parameters: None
+[2026-08-24T07:49:00.245+0000] {sql.py:562} INFO - Rows affected: 1
+[2026-08-24T07:49:00.248+0000] {logging_mixin.py:190} INFO - จำนวนแถวทั้งหมดในตาราง weather_records: 4
+[2026-08-24T07:49:00.270+0000] {sql.py:553} INFO - Running statement: 
+        SELECT province, temperature, temperature_category, ingested_at
+        FROM weather_records
+        ORDER BY id DESC
+        LIMIT 4;
+        , parameters: None
+[2026-08-24T07:49:00.277+0000] {sql.py:562} INFO - Rows affected: 4
+[2026-08-24T07:49:00.282+0000] {logging_mixin.py:190} INFO - ===== แถวล่าสุดที่เพิ่ง insert =====
+[2026-08-24T07:49:00.287+0000] {logging_mixin.py:190} INFO - ภูเก็ต: 26.7 °C (อากาศดี) - บันทึกเมื่อ 2026-08-24 07:48:57.038707
+[2026-08-24T07:49:00.290+0000] {logging_mixin.py:190} INFO - ขอนแก่น: 30.8 °C (ร้อน) - บันทึกเมื่อ 2026-08-24 07:48:57.038707
+[2026-08-24T07:49:00.293+0000] {logging_mixin.py:190} INFO - เชียงใหม่: 30.1 °C (ร้อน) - บันทึกเมื่อ 2026-08-24 07:48:57.038707
+[2026-08-24T07:49:00.295+0000] {logging_mixin.py:190} INFO - กรุงเทพฯ: 32.8 °C (ร้อน) - บันทึกเมื่อ 2026-08-24 07:48:57.038707
+[2026-08-24T07:49:00.300+0000] {python.py:240} INFO - Done. Returned value was: None
+[2026-08-24T07:49:00.338+0000] {taskinstance.py:340} INFO - ::group::Post task execution logs
+[2026-08-24T07:49:00.343+0000] {taskinstance.py:352} INFO - Marking task as SUCCESS. dag_id=etl_weather_postgres_dag, task_id=verify_load, run_id=manual__2026-08-24T07:48:32.498888+00:00, execution_date=20260824T074832, start_date=20260824T074859, end_date=20260824T074900
+[2026-08-24T07:49:00.412+0000] {local_task_job_runner.py:266} INFO - Task exited with return code 0
+[2026-08-24T07:49:00.465+0000] {taskinstance.py:3895} INFO - 0 downstream tasks scheduled from follow-on schedule check
+[2026-08-24T07:49:00.469+0000] {local_task_job_runner.py:245} INFO - ::endgroup::

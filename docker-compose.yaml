@@ -1,0 +1,218 @@
+# =========================================================================
+# docker-compose.yaml — Apache Airflow (CeleryExecutor) + Postgres (target DB)
+# ปรับจากไฟล์ทางการของ Airflow (docker-compose.yaml สำหรับ quick-start)
+# เพิ่ม service "postgres_target" สำหรับใช้เป็นปลายทาง ETL (scrape -> clean -> load)
+# แยก host port เพื่อไม่ชนกับ container postgres ตัวอื่นที่มีอยู่แล้วในเครื่อง
+# =========================================================================
+#
+# วิธีใช้งาน:
+#   1) mkdir -p ./dags ./logs ./plugins ./config
+#   2) echo -e "AIRFLOW_UID=$(id -u)" > .env   (Linux/Mac)
+#      หรือใส่ AIRFLOW_UID=50000 เองถ้าเป็น Windows/Mac ที่ไม่มีคำสั่ง id -u
+#   3) docker compose up airflow-init
+#   4) docker compose up -d
+#   5) เปิด http://localhost:8080  (user/pass เริ่มต้น: airflow / airflow)
+#
+# Postgres สำหรับ ETL (ปลายทางโหลดข้อมูล):
+#   - จากภายใน docker network (ใช้ตอนตั้งค่า Airflow Connection): host=postgres_target, port=5432
+#   - จากเครื่อง host (เช่น DBeaver/pgAdmin): host=localhost, port=5433
+#
+# ถ้ามี image ที่ build เพิ่ม library เอง (beautifulsoup4, pandas, sqlalchemy,
+# psycopg2-binary, requests) ให้แก้บรรทัด "image: ${AIRFLOW_IMAGE_NAME...}"
+# เป็น "build: ." แล้ววาง Dockerfile ไว้โฟลเดอร์เดียวกัน
+# =========================================================================
+
+x-airflow-common:
+  &airflow-common
+  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.10.4}
+  # build: .   # <-- ใช้บรรทัดนี้แทนด้านบนถ้าต้องการ build image เองจาก Dockerfile
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-beautifulsoup4 pandas sqlalchemy psycopg2-binary requests apache-airflow-providers-postgres}
+  volumes:
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+    - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
+    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+
+services:
+
+  # ---------------------------------------------------------------------
+  # Postgres สำหรับ metadata ของ Airflow เอง (ห้ามใช้ปนกับ DB ปลายทาง ETL)
+  # ---------------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    container_name: airflow_metadata_db
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  redis:
+    image: redis:7.2-bookworm
+    container_name: airflow_redis
+    expose:
+      - 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+      start_period: 30s
+    restart: always
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow_webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow_scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-worker:
+    <<: *airflow-common
+    container_name: airflow_worker
+    command: celery worker
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+      DUMB_INIT_SETSID: "0"
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: airflow_triggerer
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow_init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /sources/logs /sources/dags /sources/plugins
+        chown -R "${AIRFLOW_UID:-50000}:0" /sources/{logs,dags,plugins}
+        exec /entrypoint airflow version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+      _PIP_ADDITIONAL_REQUIREMENTS: ''
+    user: "0:0"
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}:/sources
+
+  airflow-cli:
+    <<: *airflow-common
+    container_name: airflow_cli
+    profiles:
+      - debug
+    environment:
+      <<: *airflow-common-env
+      CONNECTION_CHECK_MAX_COUNT: "0"
+    command:
+      - bash
+      - -c
+      - airflow
+
+  # ---------------------------------------------------------------------
+  # Postgres ปลายทางสำหรับงาน ETL (scrape -> clean -> load)
+  # แยกจาก metadata DB ของ Airflow โดยเด็ดขาด, host port แยกกันชนกับ
+  # container postgres ตัวอื่นที่มีอยู่แล้วในเครื่อง (ใช้ 5433 แทน 5432)
+  # ---------------------------------------------------------------------
+  postgres_target:
+    image: postgres:16
+    container_name: postgres_target
+    environment:
+      POSTGRES_USER: etluser
+      POSTGRES_PASSWORD: etlpass
+      POSTGRES_DB: etl_db
+    ports:
+      - "5433:5432"   # host:container -> ใช้ 5433 จากเครื่อง host เพื่อเลี่ยง conflict
+    volumes:
+      - postgres-target-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "etluser", "-d", "etl_db"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+volumes:
+  postgres-db-volume:
+  postgres-target-volume:
