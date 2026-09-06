@@ -1,5 +1,6 @@
 """Serve the evaluated HeartDisease pipeline produced by Airflow."""
 
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -7,11 +8,15 @@ from typing import Literal
 import joblib
 import numpy as np
 import pandas as pd
+import psycopg2
+from psycopg2.extras import Json
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 router = APIRouter()
 MODEL_DIR = Path("/models/heart_failure_models")
+# DSN ของ postgres_target มาจาก docker-compose; ไม่ตั้งไว้ = ปิดการเก็บ log
+PREDICTION_LOG_DSN = os.getenv("PREDICTION_LOG_DSN", "")
 
 
 class PredictHeartRequest(BaseModel):
@@ -42,6 +47,27 @@ def latest_model_path():
     return max(candidates, key=lambda p: p.stat().st_mtime_ns, default=None)
 
 
+def log_prediction(model_run, prediction, probability, features):
+    """เก็บทุก request ลง heart_prediction_log เพื่อให้ย้อนดูได้ว่าโมเดลตอบอะไรไปบ้าง
+
+    ห้าม raise เด็ดขาด — การเก็บ log ล้มเหลวต้องไม่ทำให้คนไข้ไม่ได้ผลทำนาย
+    ตาราง heart_prediction_log สร้างโดย task create_tables ของ DAG
+    """
+    if not PREDICTION_LOG_DSN:
+        return
+    try:
+        with psycopg2.connect(PREDICTION_LOG_DSN, connect_timeout=3) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO heart_prediction_log "
+                    "(model_run, predicted_heartdisease, probability_heartdisease, features) "
+                    "VALUES (%s, %s, %s, %s);",
+                    (model_run, prediction, probability, Json(features)),
+                )
+    except Exception as exc:  # noqa: BLE001 - log ล้มเหลวต้องไม่กระทบการทำนาย
+        print(f"[prediction_log] บันทึกไม่สำเร็จ ({type(exc).__name__}: {exc})")
+
+
 def heart_model_file_info():
     path = latest_model_path()
     return {
@@ -57,11 +83,13 @@ def predict_heart_failure(payload: PredictHeartRequest):
     if path is None:
         raise HTTPException(503, "ยังไม่มีโมเดล กรุณารัน DAG heart_failure_pipeline_dag ให้ผ่าน evaluate_model ก่อน")
     model = joblib.load(path)
-    features = pd.DataFrame([payload.model_dump()])
+    payload_dict = payload.model_dump()
+    features = pd.DataFrame([payload_dict])
     # Match validate_features in the training DAG before pipeline preprocessing.
     features[["RestingBP", "Cholesterol"]] = features[["RestingBP", "Cholesterol"]].replace(0, np.nan)
     prediction = int(model.predict(features)[0])
     probability = float(model.predict_proba(features)[0, list(model.classes_).index(1)])
+    log_prediction(path.parent.name, prediction, probability, payload_dict)
     return PredictHeartResponse(
         predicted_HeartDisease=prediction,
         probability_HeartDisease=probability,

@@ -11,7 +11,7 @@ Target: HeartDisease (0 = Normal, 1 = heart disease), ไม่ใช่เว�
   create_tables -> extract_data -> prepare_data -> train_model -> evaluate_model
   -> get_previous_metrics -> decide_deploy (branch)
        |-> deploy_model -> smoke_test --|
-       |-> skip_deploy ----------------|--> log_result -> predict_data
+       |-> skip_deploy ----------------|--> log_result
 
 ต่างจาก ml_02 ตรงที่ไฟล์นี้เป็นงาน classification จึงใช้ F1 เป็นเกณฑ์เทียบ
 champion (ยิ่งสูงยิ่งดี) แทน RMSE (ยิ่งต่ำยิ่งดี) และมีเกณฑ์ขั้นต่ำ MIN_F1
@@ -30,9 +30,8 @@ champion (ยิ่งสูงยิ่งดี) แทน RMSE (ยิ่ง�
    (evaluation.json, test_predictions.csv, model.joblib)
 4. เฉพาะรอบที่ผ่านด่าน decide_deploy เท่านั้นที่จะถูกคัดลอกไปที่
    ./models/heart_failure_models/current/ ซึ่งเป็นตัวที่ model_service เสิร์ฟจริง
-5. ทำนายข้อมูลใหม่: วาง CSV ที่มี 11 features เหมือน heart.csv (ไม่ต้องมี target)
-   ที่ ./dags/data/heart_predict.csv แล้ว Trigger พร้อม configuration:
-   {"prediction_csv": "/opt/airflow/dags/data/heart_predict.csv"}
+5. ทำนายข้อมูลใหม่: ยิงที่ model_service (POST /predict_heart_failure)
+   DAG นี้ทำหน้าที่เทรนกับ deploy อย่างเดียว ไม่รับงานทำนาย
 
 ใช้ pandas, scikit-learn, joblib, requests และ models volume จาก compose เดิม
 โมเดลบันทึก preprocessing รวมไว้แล้ว: model.predict(dataframe) ใช้งานได้ทันที
@@ -71,7 +70,10 @@ MODEL_DIR = Path("/opt/airflow/models/heart_failure_models")
 CURRENT_DIR = MODEL_DIR / "current"
 DOWNLOAD_URL = "https://www.kaggle.com/api/v1/datasets/download/fedesoriano/heart-failure-prediction"
 
-MIN_F1 = 0.75   # เกณฑ์ขั้นต่ำ ต้องผ่านก่อนเสมอ แม้ยังไม่มี champion ให้เทียบ
+# เกณฑ์ขั้นต่ำไม่ใช้เลขตายตัว แต่ผูกกับ baseline ของรอบนั้น ๆ
+# (baseline = ทายว่าป่วยทุกคนโดยไม่ดู feature เลย ซึ่งบน dataset นี้ได้ f1 ~0.71)
+# ตั้งเป็นเลขคงที่เช่น 0.75 จะดูเข้มงวดแต่จริง ๆ ห่างจากการเดามั่วแค่ 0.04
+MIN_F1_MARGIN = 0.10
 
 NUMERIC = ["Age", "RestingBP", "Cholesterol", "FastingBS", "MaxHR", "Oldpeak"]
 CATEGORICAL = ["Sex", "ChestPainType", "RestingECG", "ExerciseAngina", "ST_Slope"]
@@ -97,6 +99,19 @@ CREATE TABLE IF NOT EXISTS heart_model_metrics (
     roc_auc FLOAT NOT NULL,
     deployed BOOLEAN NOT NULL,
     run_at TIMESTAMP DEFAULT NOW()
+);
+
+ALTER TABLE heart_model_metrics ADD COLUMN IF NOT EXISTS baseline_f1 FLOAT;
+
+-- model_service เขียนลงตารางนี้ทุกครั้งที่มีคนเรียก /predict_heart_failure
+-- เก็บ features เป็น JSONB เพื่อให้ย้อนดู drift ของ input ได้ทีหลัง
+CREATE TABLE IF NOT EXISTS heart_prediction_log (
+    id SERIAL PRIMARY KEY,
+    predicted_at TIMESTAMP DEFAULT NOW(),
+    model_run VARCHAR(200) NOT NULL,
+    predicted_heartdisease INT NOT NULL,
+    probability_heartdisease FLOAT NOT NULL,
+    features JSONB NOT NULL
 );
 """
 
@@ -222,11 +237,12 @@ def evaluate_model(**context):
     """
     import joblib
     import sklearn
+    from sklearn.dummy import DummyClassifier
     from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
 
     ti = context["ti"]
     run_dir = Path(ti.xcom_pull(task_ids="train_model"))
-    X_train, X_test, _, y_test = joblib.load(run_dir / "split.joblib")
+    X_train, X_test, y_train, y_test = joblib.load(run_dir / "split.joblib")
     model = joblib.load(run_dir / "model.joblib")
     predicted = model.predict(X_test)
     probability = model.predict_proba(X_test)[:, list(model.classes_).index(1)]
@@ -241,14 +257,30 @@ def evaluate_model(**context):
         "train_rows": len(X_train), "test_rows": len(X_test),
         "sklearn_version": sklearn.__version__, "random_state": 42,
     }
+
+    # baseline: ทายว่าป่วยทุกคน ไม่ดู feature เลยสักตัว เป็นคู่เทียบว่าโมเดลจริง
+    # เก่งกว่าการเดามั่วแค่ไหน (ถ้าห่างกันนิดเดียว แปลว่าโจทย์ง่าย ไม่ใช่โมเดลเก่ง)
+    baseline = DummyClassifier(strategy="constant", constant=1).fit(X_train, y_train)
+    baseline_predicted = baseline.predict(X_test)
+    metrics["baseline"] = {
+        "strategy": "ทายว่าป่วย (1) ทุกแถว",
+        "accuracy": float(accuracy_score(y_test, baseline_predicted)),
+        "precision": float(precision_score(y_test, baseline_predicted, zero_division=0)),
+        "recall": float(recall_score(y_test, baseline_predicted, zero_division=0)),
+        "f1": float(f1_score(y_test, baseline_predicted, zero_division=0)),
+    }
+    metrics["f1_over_baseline"] = metrics["f1"] - metrics["baseline"]["f1"]
     (run_dir / "evaluation.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     output = X_test.copy()
     output["actual_HeartDisease"] = y_test
     output["predicted_HeartDisease"] = predicted
     output["probability_HeartDisease"] = probability
     output.to_csv(run_dir / "test_predictions.csv", index=False)
-    print(json.dumps(metrics, indent=2))
+    print(json.dumps(metrics, indent=2, ensure_ascii=False))
+    print(f"f1 ของโมเดล {metrics['f1']:.4f} vs baseline {metrics['baseline']['f1']:.4f} "
+          f"(ดีกว่า {metrics['f1_over_baseline']:+.4f})")
     ti.xcom_push(key="f1", value=metrics["f1"])
+    ti.xcom_push(key="baseline_f1", value=metrics["baseline"]["f1"])
     return metrics
 
 
@@ -276,13 +308,16 @@ def decide_deploy(**context):
     """BranchPythonOperator: deploy เมื่อผ่านเกณฑ์ขั้นต่ำ และดีกว่า champion เดิม"""
     ti = context["ti"]
     f1 = ti.xcom_pull(task_ids="evaluate_model", key="f1")
+    baseline_f1 = ti.xcom_pull(task_ids="evaluate_model", key="baseline_f1")
     previous_f1 = ti.xcom_pull(task_ids="get_previous_metrics", key="previous_f1")
 
-    if f1 < MIN_F1:
-        print(f"F1 {f1:.4f} ต่ำกว่าเกณฑ์ขั้นต่ำ {MIN_F1} -> skip_deploy")
+    required = baseline_f1 + MIN_F1_MARGIN
+    if f1 < required:
+        print(f"F1 {f1:.4f} ไม่ถึงเกณฑ์ {required:.4f} "
+              f"(baseline {baseline_f1:.4f} + margin {MIN_F1_MARGIN}) -> skip_deploy")
         return "skip_deploy"
     if previous_f1 is None:
-        print(f"F1 {f1:.4f} ผ่านเกณฑ์ขั้นต่ำ และยังไม่มี champion -> deploy_model")
+        print(f"F1 {f1:.4f} ผ่านเกณฑ์ {required:.4f} และยังไม่มี champion -> deploy_model")
         return "deploy_model"
     if f1 > previous_f1:
         print(f"F1 ใหม่ {f1:.4f} ดีกว่า champion เดิม {previous_f1:.4f} -> deploy_model")
@@ -321,9 +356,12 @@ def skip_deploy(**context):
     """ไม่ deploy เพราะยังสู้โมเดลเดิม (champion) ไม่ได้ หรือไม่ผ่านเกณฑ์ขั้นต่ำ"""
     ti = context["ti"]
     f1 = ti.xcom_pull(task_ids="evaluate_model", key="f1")
+    baseline_f1 = ti.xcom_pull(task_ids="evaluate_model", key="baseline_f1")
     previous_f1 = ti.xcom_pull(task_ids="get_previous_metrics", key="previous_f1")
     champion = "ยังไม่มี" if previous_f1 is None else f"{previous_f1:.4f}"
-    print(f"ข้าม deploy: F1 ใหม่ {f1:.4f} vs champion เดิม {champion} (เกณฑ์ขั้นต่ำ {MIN_F1})")
+    print(f"ข้าม deploy: F1 ใหม่ {f1:.4f} vs champion เดิม {champion} "
+          f"(เกณฑ์ขั้นต่ำ {baseline_f1 + MIN_F1_MARGIN:.4f} = baseline {baseline_f1:.4f} "
+          f"+ margin {MIN_F1_MARGIN})")
     print(f"โมเดลเดิมใน {CURRENT_DIR} ยังคงใช้งานต่อไป")
     return "skipped"
 
@@ -412,50 +450,21 @@ def log_result(**context):
 
     hook.run(
         "INSERT INTO heart_model_metrics "
-        "(model_name, run_dir, accuracy, precision_score, recall_score, f1, roc_auc, deployed) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s);",
+        "(model_name, run_dir, accuracy, precision_score, recall_score, f1, roc_auc, "
+        "deployed, baseline_f1) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);",
         parameters=(MODEL_NAME, run_dir.name, metrics["accuracy"], metrics["precision"],
-                    metrics["recall"], metrics["f1"], metrics["roc_auc"], deployed),
+                    metrics["recall"], metrics["f1"], metrics["roc_auc"], deployed,
+                    metrics["baseline"]["f1"]),
     )
 
     print("===== สรุปผล Stage 3 (heart failure pipeline) =====")
     print(f"run dir: {run_dir.name}")
     print(f"accuracy: {metrics['accuracy']:.4f} | f1: {metrics['f1']:.4f} | "
           f"roc_auc: {metrics['roc_auc']:.4f}")
+    print(f"baseline f1: {metrics['baseline']['f1']:.4f} "
+          f"(โมเดลดีกว่า {metrics['f1_over_baseline']:+.4f})")
     print(f"Deploy รอบนี้: {'ใช่' if deployed else 'ไม่ใช่'}")
-
-
-def predict_data(**context):
-    """Batch inference ด้วยโมเดลที่เสิร์ฟอยู่จริง (current/) — ทำเฉพาะเมื่อส่ง conf มา
-
-    Trigger พร้อม configuration: {"prediction_csv": "/opt/airflow/dags/data/heart_predict.csv"}
-    ถ้าไม่ส่งมาจะข้าม task นี้ไปเฉย ๆ (การทดสอบโหลดโมเดลย้ายไปอยู่ที่ smoke_test แล้ว)
-    """
-    import joblib
-    import pandas as pd
-
-    prediction_csv = (context["dag_run"].conf or {}).get("prediction_csv")
-    if not prediction_csv:
-        print("ไม่ได้ส่ง prediction_csv มาใน configuration — ข้าม batch inference")
-        return None
-
-    model_path = CURRENT_DIR / "model.joblib"
-    if not model_path.is_file():
-        raise RuntimeError(
-            f"ยังไม่มีโมเดลที่ผ่านด่าน deploy ใน {CURRENT_DIR} "
-            "(รอบนี้อาจเข้าทาง skip_deploy) จึงยังทำนายไม่ได้"
-        )
-
-    run_dir = Path(context["ti"].xcom_pull(task_ids="train_model"))
-    model = joblib.load(model_path)
-    samples = validate_features(pd.read_csv(prediction_csv))
-    output = samples.copy()
-    output["predicted_HeartDisease"] = model.predict(samples)
-    output["probability_HeartDisease"] = model.predict_proba(samples)[:, list(model.classes_).index(1)]
-    path = run_dir / "predictions.csv"
-    output.to_csv(path, index=False)
-    print(f"บันทึกผลทำนาย {len(output)} แถว: {path}")
-    return str(path)
 
 
 # -----------------------------------------------------------------
@@ -502,8 +511,6 @@ with DAG(
         trigger_rule="none_failed_min_one_success",
     )
 
-    predict_task = PythonOperator(task_id="predict_data", python_callable=predict_data)
-
     # ลำดับการรันทั้งหมด (รูปทรงเดียวกับ ml_02: เส้นตรง -> branch -> มาบรรจบที่ log_result)
     (
         create_tables_task
@@ -516,4 +523,3 @@ with DAG(
     )
     decide_task >> deploy_task >> smoke_test_task >> log_task
     decide_task >> skip_task >> log_task
-    log_task >> predict_task

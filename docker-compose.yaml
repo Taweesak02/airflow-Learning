@@ -231,6 +231,14 @@ services:
     container_name: model_api
     ports:
       - "8001:8000"   # host:container -> เปิดเว็บทดสอบที่ http://localhost:8001
+    environment:
+      # เก็บ log ทุก prediction ลง postgres_target (ตาราง heart_prediction_log
+      # สร้างโดย task create_tables ของ heart_failure_pipeline_dag)
+      # ลบบรรทัดนี้ = ปิดการเก็บ log โดยที่ API ยังทำงานปกติ
+      PREDICTION_LOG_DSN: postgresql://etluser:etlpass@postgres_target:5432/etl_db
+    depends_on:
+      postgres_target:
+        condition: service_healthy
     volumes:
       - ${AIRFLOW_PROJ_DIR:-.}/models:/models:ro   # อ่านอย่างเดียว ไม่ได้เขียนกลับ
     restart: unless-stopped
