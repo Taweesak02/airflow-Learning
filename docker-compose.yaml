@@ -18,8 +18,13 @@
 #   - จากเครื่อง host (เช่น DBeaver/pgAdmin): host=localhost, port=5433
 #
 # ถ้ามี image ที่ build เพิ่ม library เอง (beautifulsoup4, pandas, sqlalchemy,
-# psycopg2-binary, requests) ให้แก้บรรทัด "image: ${AIRFLOW_IMAGE_NAME...}"
-# เป็น "build: ." แล้ววาง Dockerfile ไว้โฟลเดอร์เดียวกัน
+# psycopg2-binary, requests, scikit-learn, joblib) ให้แก้บรรทัด
+# "image: ${AIRFLOW_IMAGE_NAME...}" เป็น "build: ." แล้ววาง Dockerfile ไว้
+# โฟลเดอร์เดียวกัน
+#
+# scikit-learn และ joblib ถูกเพิ่มเข้ามาสำหรับ Workshop 2 (ML pipeline
+# ml_01_iris_pipeline.py เป็นต้นไป) — ถ้าใช้เฉพาะไฟล์ workshop 1 (01-05)
+# ตัดสองตัวนี้ออกได้ ไม่จำเป็นต้องใช้
 # =========================================================================
 
 x-airflow-common:
@@ -37,12 +42,13 @@ x-airflow-common:
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
-    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-beautifulsoup4 pandas sqlalchemy psycopg2-binary requests apache-airflow-providers-postgres}
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-beautifulsoup4 pandas sqlalchemy psycopg2-binary requests apache-airflow-providers-postgres scikit-learn joblib}
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
     - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:-.}/models:/opt/airflow/models
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -212,6 +218,22 @@ services:
       retries: 5
       start_period: 5s
     restart: always
+
+  # ---------------------------------------------------------------------
+  # Iris Model Serving API (Workshop 2, ตัวอย่างขั้นสูง)
+  # แยกจาก Airflow โดยสิ้นเชิง คนละ image คนละ process
+  # อ่านไฟล์โมเดลที่ deploy_model (ใน ml_01_iris_pipeline.py) เขียนไว้ ผ่าน
+  # volume "models" ที่ mount ร่วมกันกับ Airflow (path ./models บนเครื่อง host)
+  # เว็บทดสอบ: เปิด http://localhost:8001 หลัง container ขึ้นแล้ว
+  # ---------------------------------------------------------------------
+  model_api:
+    build: ./model_service
+    container_name: model_api
+    ports:
+      - "8001:8000"   # host:container -> เปิดเว็บทดสอบที่ http://localhost:8001
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}/models:/models:ro   # อ่านอย่างเดียว ไม่ได้เขียนกลับ
+    restart: unless-stopped
 
 volumes:
   postgres-db-volume:
