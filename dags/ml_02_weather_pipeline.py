@@ -329,12 +329,22 @@ def smoke_test(**kwargs):
     latest_date = ti.xcom_pull(task_ids="prepare_training_data", key="latest_date")
 
     model = joblib.load(CURRENT_MODEL_PATH)
-    forecast = model.predict([latest_features])[0]
+    forecast = float(model.predict([latest_features])[0])
 
     print("===== Smoke Test: เรียกใช้งานโมเดลที่เพิ่ง deploy =====")
     print(f"ข้อมูลล่าสุดที่มี: {latest_date} (feature: {latest_features})")
     print(f"พยากรณ์อุณหภูมิวันถัดไป: {forecast:.2f} °C")
-    print("โมเดลใช้งานได้จริง พร้อมให้บริการ")
+
+    # ไม่ใช่แค่ "เรียกได้แล้วจบ" — ค่าที่ได้ต้องสมเหตุสมผลด้วย
+    # (NaN/inf = โมเดลเพี้ยน, นอกช่วง 0-55 °C = ไม่ใช่อุณหภูมิกรุงเทพฯ)
+    if not math.isfinite(forecast):
+        raise ValueError(f"Smoke test ไม่ผ่าน: ค่าพยากรณ์ไม่ใช่ตัวเลขที่ใช้ได้ ({forecast})")
+    if not (0.0 <= forecast <= 55.0):
+        raise ValueError(
+            f"Smoke test ไม่ผ่าน: ค่าพยากรณ์ {forecast:.2f} °C อยู่นอกช่วงที่เป็นไปได้ (0-55 °C)"
+        )
+
+    print("โมเดลใช้งานได้จริง และค่าที่ได้อยู่ในช่วงสมเหตุสมผล พร้อมให้บริการ")
 
 
 def log_result(**kwargs):
